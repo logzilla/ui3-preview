@@ -1,0 +1,63 @@
+# UI3 Preview - image-based sidecar deployment
+#
+# Runs the UI3 preview (frontend + backend) alongside an existing LogZilla
+# installation, pulling prebuilt public images from GHCR - no source, no build.
+# UI3 joins LogZilla's Docker network and reaches internal services by
+# container DNS name; no LogZilla changes are required.
+#
+# You normally do NOT run this directly - run `./install.sh`, which resolves
+# secrets, writes `.env`, and brings this up. To pin a known-good build,
+# replace `:latest` with a `:sha-<short>` tag on both images.
+#
+# Prerequisites:
+#   1. A running standard LogZilla install (its Docker network + containers up)
+#   2. A `.env` next to this file (install.sh generates it)
+
+services:
+  ui3-frontend:
+    container_name: ui3-frontend
+    image: ghcr.io/logzilla/ui3-frontend:latest
+    ports:
+      - "${UI3_PORT:?set UI3_PORT in .env (run ./install.sh)}:80"
+    depends_on:
+      ui3-backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - lz_network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  ui3-backend:
+    container_name: ui3-backend
+    image: ghcr.io/logzilla/ui3-backend:latest
+    volumes:
+      - ${LZ_ETC_PATH:?set LZ_ETC_PATH in .env (run ./install.sh)}:/etc/logzilla:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - cache-data:/data
+    env_file:
+      - .env
+    environment:
+      - CACHE_DB_PATH=/data/cache.db
+    restart: unless-stopped
+    networks:
+      - lz_network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  lz_network:
+    name: ${LZ_NETWORK_NAME:?set LZ_NETWORK_NAME in .env (run ./install.sh)}
+    external: true
+
+volumes:
+  cache-data:
+    driver: local

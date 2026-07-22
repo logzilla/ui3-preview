@@ -1,0 +1,12 @@
+ui3-preview
+Copyright 2026 LogZilla Corporation
+
+This repository contains only preview installer glue - the bootstrap script
+(install.sh), the image-based compose file (compose.yml), and documentation.
+That glue is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The UI3 container images it pulls
+(ghcr.io/logzilla/ui3-frontend and ghcr.io/logzilla/ui3-backend) are LogZilla
+proprietary software, made available for preview and evaluation against a
+licensed LogZilla installation. Those images are NOT covered by the Apache-2.0
+license of this repository and remain subject to LogZilla's software terms.

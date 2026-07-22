@@ -1,0 +1,4 @@
+# install.sh writes a real .env containing secrets (API tokens, Django key).
+# It must never be committed.
+.env
+.env.*
