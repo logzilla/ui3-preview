@@ -141,6 +141,17 @@ validate_token() {
   fi
   case "$_PROBE_HTTP" in
     301|302|307|308)
+      # Follow the redirect ONLY as an HTTP->HTTPS upgrade. An already-https
+      # base that redirects (e.g. canonicalization) must NOT re-enter this
+      # path - it could grant the loopback cert-skip to a probe that never
+      # needed upgrading. It falls through to the non-200 fail-loud below.
+      case "$base" in
+        http://*) : ;;
+        *)
+          warn "the LZ API at ${base} answered HTTP ${_PROBE_HTTP} (a redirect); refusing to follow it from a non-http:// base - set LZ_HOST_URL to the URL the server expects"
+          return 2
+          ;;
+      esac
       # Strip trailing slashes BEFORE the :80 strip, or a trailing slash
       # shields the port ('localhost:80/' must become 'localhost', not
       # 'localhost:80' - retrying https against the plaintext port always

@@ -35,6 +35,8 @@ case "${MOCK_MODE}" in
       http://*)  printf '\n301' ;;
       https://*) echo "curl: (7) Failed to connect to localhost port 443" >&2; exit 7 ;;
     esac ;;
+  always-redirect)
+    printf '\n301' ;;
 esac
 MOCK
 chmod +x "${WORK}/curl"
@@ -106,6 +108,14 @@ export MOCK_LOG="${WORK}/log7"; : > "$MOCK_LOG"
 export MOCK_MODE=redirect-then-ok LZ_HOST_URL="http://localhost:80@evil.com/"
 validate_token tok; check "userinfo-host 301 -> verified https retry -> 0" 0 $?
 assert_not "userinfo host must NOT get the loopback cert-skip" retry_used_k "@evil.com"
+
+# 8. Already-https base that redirects: NOT an http->https upgrade - refuse
+#    to follow (rc 2) and never grant the loopback -k retry
+export MOCK_LOG="${WORK}/log8"; : > "$MOCK_LOG"
+export MOCK_MODE=always-redirect LZ_HOST_URL="https://localhost"
+validate_token tok; check "https base 301 -> refused, rc 2" 2 $?
+assert_not "https-base redirect must NOT trigger a -k retry" retry_used_k "https://localhost"
+assert "https-base redirect warns instead of following" grep -q "WARN: .*refusing to follow" "$MOCK_LOG"
 
 echo
 echo "passed=$pass failed=$fail"
