@@ -105,11 +105,20 @@ info "Resolving LogZilla API token"
 
 # _auth_probe <token> <base_url> [curl-extra-arg...]
 # Curls <base_url>/api/auth; sets _PROBE_HTTP/_PROBE_BODY. Non-zero only on
-# transport failure (DNS/refused/timeout) - HTTP status is always captured.
+# transport failure (DNS/refused/timeout/TLS), with curl's own error text
+# captured in _PROBE_ERR so callers can surface the real reason - HTTP
+# status is always captured.
 _auth_probe() {
-  local token="$1" url="$2" resp; shift 2
-  resp="$(curl -sS -m 20 -w $'\n%{http_code}' "$@" \
-    -H "Authorization: token ${token}" "${url}/api/auth" 2>/dev/null)" || return 1
+  local token="$1" url="$2" resp errf; shift 2
+  _PROBE_ERR=""
+  errf="$(mktemp)"
+  if ! resp="$(curl -sS -m 20 -w $'\n%{http_code}' "$@" \
+    -H "Authorization: token ${token}" "${url}/api/auth" 2>"$errf")"; then
+    _PROBE_ERR="$(cat "$errf")"
+    rm -f "$errf"
+    return 1
+  fi
+  rm -f "$errf"
   _PROBE_HTTP="$(printf '%s' "$resp" | tail -n1)"
   _PROBE_BODY="$(printf '%s' "$resp" | sed '$d')"
 }
@@ -127,29 +136,33 @@ _auth_probe() {
 validate_token() {
   local token="$1" base="${LZ_HOST_URL}" https_base host_part
   if ! _auth_probe "$token" "$base"; then
-    warn "could not reach the LZ API at ${base}/api/auth"
+    warn "could not reach the LZ API at ${base}/api/auth${_PROBE_ERR:+ - ${_PROBE_ERR}}"
     return 2
   fi
   case "$_PROBE_HTTP" in
     301|302|307|308)
-      host_part="$(printf '%s' "$base" | sed -E 's#^[a-zA-Z]+://##; s#:80$##; s#/+$##')"
+      # Strip trailing slashes BEFORE the :80 strip, or a trailing slash
+      # shields the port ('localhost:80/' must become 'localhost', not
+      # 'localhost:80' - retrying https against the plaintext port always
+      # fails the TLS handshake).
+      host_part="$(printf '%s' "$base" | sed -E 's#^[a-zA-Z]+://##; s#/+$##; s#:80$##')"
       https_base="https://${host_part}"
-      case "$host_part" in
-        localhost|localhost:*|127.0.0.1|127.0.0.1:*|\[::1\]|\[::1\]:*)
+      # Anchored match, not a glob: 'localhost:80@evil.com' must NOT be
+      # granted the loopback cert-skip (curl would read 'localhost:80' as
+      # userinfo and probe evil.com with verification off).
+      if printf '%s' "$host_part" | grep -Eq '^(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?$'; then
           warn "the LZ API at ${base} redirects HTTP to HTTPS (HTTP ${_PROBE_HTTP}); retrying token validation against ${https_base} - certificate verification is skipped for this loopback-only probe"
           if ! _auth_probe "$token" "$https_base" -k; then
-            warn "could not reach the LZ API at ${https_base}/api/auth after the HTTPS retry"
+            warn "could not reach the LZ API at ${https_base}/api/auth after the HTTPS retry${_PROBE_ERR:+ - ${_PROBE_ERR}}"
             return 2
           fi
-          ;;
-        *)
+      else
           warn "the LZ API at ${base} redirects HTTP to HTTPS (HTTP ${_PROBE_HTTP}); retrying token validation against ${https_base}"
           if ! _auth_probe "$token" "$https_base"; then
-            warn "could not reach the LZ API at ${https_base}/api/auth after the HTTPS retry (if its certificate does not match '${host_part}', set LZ_HOST_URL to the certificate's hostname and re-run)"
+            warn "could not reach the LZ API at ${https_base}/api/auth after the HTTPS retry${_PROBE_ERR:+ - ${_PROBE_ERR}} (if its certificate does not match '${host_part}', set LZ_HOST_URL to the certificate's hostname and re-run)"
             return 2
           fi
-          ;;
-      esac
+      fi
       ;;
   esac
   [ "$_PROBE_HTTP" = "200" ] || { warn "LZ API returned HTTP ${_PROBE_HTTP} while validating the token"; return 2; }

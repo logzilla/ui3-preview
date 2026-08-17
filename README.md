@@ -51,7 +51,7 @@ duplicate tokens. To pin a specific build, change both image tags in
 | Port already in use | Pick another: `sudo UI3_PORT=9090 ./install.sh`. |
 | `that token is ingest-only / invalid` | Use a user-level token (press Enter to have the installer create one). |
 | SEC / orchestration errors in the UI | `SEC_API_URL` must be `http://front:80`; the installer sets this - don't change it to `gunicorn:80`. |
-| `could not validate the token` | LogZilla's web port isn't on `localhost:80` here. Run `sudo LZ_HOST_URL=http://your-lz:PORT ./install.sh`. |
+| `could not validate the token` | Two common causes. LogZilla's web port isn't on `localhost:80` here: run `sudo LZ_HOST_URL=http://your-lz:PORT ./install.sh`. Or LogZilla is HTTPS-configured and its certificate doesn't match the probed hostname: run `sudo LZ_HOST_URL=https://your-lz-cert-hostname ./install.sh` (the warn line includes curl's exact error). |
 
 ## Security
 
