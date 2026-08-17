@@ -34,6 +34,8 @@ CACHE_REFRESH_INTERVAL="${CACHE_REFRESH_INTERVAL:-300}"
 CACHE_TTL="${CACHE_TTL:-600}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 # Where to validate a token against the LZ API (LZ nginx published on the host).
+# HTTPS-configured LZ installs answer this with a 301 to https:// - the token
+# validator below follows that redirect explicitly (see validate_token).
 LZ_HOST_URL="${LZ_HOST_URL:-http://localhost:80}"
 
 # ── Output helpers ───────────────────────────────────────────────────
@@ -101,17 +103,82 @@ ok "LZ secrets file: ${SECRETS_FILE}"
 # ── 2. Resolve LOGZILLA_API_TOKEN (paste or auto-create; validate) ───
 info "Resolving LogZilla API token"
 
+# _auth_probe <token> <base_url> [curl-extra-arg...]
+# Curls <base_url>/api/auth; sets _PROBE_HTTP/_PROBE_BODY. Non-zero only on
+# transport failure (DNS/refused/timeout/TLS), with curl's own error text
+# captured in _PROBE_ERR so callers can surface the real reason - HTTP
+# status is always captured.
+_auth_probe() {
+  local token="$1" url="$2" resp errf; shift 2
+  _PROBE_ERR=""
+  errf="$(mktemp)"
+  if ! resp="$(curl -sS -m 20 -w $'\n%{http_code}' "$@" \
+    -H "Authorization: token ${token}" "${url}/api/auth" 2>"$errf")"; then
+    _PROBE_ERR="$(cat "$errf")"
+    rm -f "$errf"
+    return 1
+  fi
+  rm -f "$errf"
+  _PROBE_HTTP="$(printf '%s' "$resp" | tail -n1)"
+  _PROBE_BODY="$(printf '%s' "$resp" | sed '$d')"
+}
+
 # validate_token <token>: 0 = user-scoped (good); 1 = ingest/invalid; 2 = could not validate
+#
+# HTTPS-configured LZ installs answer http://localhost:80 with a 301/308 to
+# https:// - previously that redirect was treated as a hard validation
+# failure and the installer died (QA bug #12). `curl -L` alone is not the
+# fix: the redirect target's certificate rarely matches 'localhost', so the
+# follow fails on verification anyway. Instead the redirect is followed
+# EXPLICITLY to the same host over https, and only when that host is
+# loopback is certificate verification skipped (loudly) - a non-loopback
+# LZ_HOST_URL keeps full verification.
 validate_token() {
-  local token="$1" resp http body
-  resp="$(curl -sS -m 20 -w $'\n%{http_code}' \
-    -H "Authorization: token ${token}" "${LZ_HOST_URL}/api/auth" 2>/dev/null)" \
-    || { warn "could not reach the LZ API at ${LZ_HOST_URL}/api/auth"; return 2; }
-  http="$(printf '%s' "$resp" | tail -n1)"
-  body="$(printf '%s' "$resp" | sed '$d')"
-  [ "$http" = "200" ] || { warn "LZ API returned HTTP ${http} while validating the token"; return 2; }
-  if printf '%s' "$body" | grep -Eq '"user"[[:space:]]*:[[:space:]]*null'; then return 1; fi
-  if printf '%s' "$body" | grep -Eq '"user"[[:space:]]*:[[:space:]]*\{'; then return 0; fi
+  local token="$1" base="${LZ_HOST_URL}" https_base host_part
+  if ! _auth_probe "$token" "$base"; then
+    warn "could not reach the LZ API at ${base}/api/auth${_PROBE_ERR:+ - ${_PROBE_ERR}}"
+    return 2
+  fi
+  case "$_PROBE_HTTP" in
+    301|302|307|308)
+      # Follow the redirect ONLY as an HTTP->HTTPS upgrade. An already-https
+      # base that redirects (e.g. canonicalization) must NOT re-enter this
+      # path - it could grant the loopback cert-skip to a probe that never
+      # needed upgrading. It falls through to the non-200 fail-loud below.
+      case "$base" in
+        http://*) : ;;
+        *)
+          warn "the LZ API at ${base} answered HTTP ${_PROBE_HTTP} (a redirect); refusing to follow it from a non-http:// base - set LZ_HOST_URL to the URL the server expects"
+          return 2
+          ;;
+      esac
+      # Strip trailing slashes BEFORE the :80 strip, or a trailing slash
+      # shields the port ('localhost:80/' must become 'localhost', not
+      # 'localhost:80' - retrying https against the plaintext port always
+      # fails the TLS handshake).
+      host_part="$(printf '%s' "$base" | sed -E 's#^[a-zA-Z]+://##; s#/+$##; s#:80$##')"
+      https_base="https://${host_part}"
+      # Anchored match, not a glob: 'localhost:80@evil.com' must NOT be
+      # granted the loopback cert-skip (curl would read 'localhost:80' as
+      # userinfo and probe evil.com with verification off).
+      if printf '%s' "$host_part" | grep -Eq '^(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?$'; then
+          warn "the LZ API at ${base} redirects HTTP to HTTPS (HTTP ${_PROBE_HTTP}); retrying token validation against ${https_base} - certificate verification is skipped for this loopback-only probe"
+          if ! _auth_probe "$token" "$https_base" -k; then
+            warn "could not reach the LZ API at ${https_base}/api/auth after the HTTPS retry${_PROBE_ERR:+ - ${_PROBE_ERR}}"
+            return 2
+          fi
+      else
+          warn "the LZ API at ${base} redirects HTTP to HTTPS (HTTP ${_PROBE_HTTP}); retrying token validation against ${https_base}"
+          if ! _auth_probe "$token" "$https_base"; then
+            warn "could not reach the LZ API at ${https_base}/api/auth after the HTTPS retry${_PROBE_ERR:+ - ${_PROBE_ERR}} (if its certificate does not match '${host_part}', set LZ_HOST_URL to the certificate's hostname and re-run)"
+            return 2
+          fi
+      fi
+      ;;
+  esac
+  [ "$_PROBE_HTTP" = "200" ] || { warn "LZ API returned HTTP ${_PROBE_HTTP} while validating the token"; return 2; }
+  if printf '%s' "$_PROBE_BODY" | grep -Eq '"user"[[:space:]]*:[[:space:]]*null'; then return 1; fi
+  if printf '%s' "$_PROBE_BODY" | grep -Eq '"user"[[:space:]]*:[[:space:]]*\{'; then return 0; fi
   warn "unexpected /api/auth response; cannot confirm the token is user-scoped"
   return 2
 }
@@ -145,7 +212,7 @@ set -e
 case "$_v" in
   0) ok "token is user-scoped" ;;
   1) die "that token is ingest-only / invalid - the UI needs a USER token (the ingest key is rejected with 401 by the backend). Create or paste a user-level token and re-run." ;;
-  2) die "could not validate the token against the LZ API at ${LZ_HOST_URL}. If LZ's nginx is not on localhost:80, set LZ_HOST_URL and re-run. (Refusing to proceed unvalidated.)" ;;
+  2) die "could not validate the token against the LZ API at ${LZ_HOST_URL}. If LZ's nginx is not on localhost:80, or serves HTTPS with a certificate for a specific hostname, set LZ_HOST_URL (e.g. LZ_HOST_URL=https://lz.example.com) and re-run. (Refusing to proceed unvalidated.)" ;;
 esac
 
 # ── 3. Resolve SEC_API_TOKEN + DJANGO_SECRET_KEY ─────────────────────
