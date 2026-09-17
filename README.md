@@ -9,6 +9,9 @@ LogZilla install is not modified, and you can stop UI3 at any time.
 On your LogZilla host, as root:
 
 ```bash
+# requires root access
+sudo su -
+cd /opt
 git clone https://github.com/logzilla/ui3-preview.git
 cd ui3-preview
 sudo ./install.sh
